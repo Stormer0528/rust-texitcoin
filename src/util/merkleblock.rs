@@ -61,7 +61,7 @@ use hash_types::{Txid, TxMerkleNode};
 
 use blockdata::transaction::Transaction;
 use blockdata::constants::{MAX_BLOCK_WEIGHT, MIN_TRANSACTION_WEIGHT};
-use consensus::encode::{self, Decodable, Encodable};
+use consensus::encode::{self, Decodable, Encodable, MAX_VEC_SIZE};
 use util::merkleblock::MerkleBlockError::*;
 use {Block, BlockHeader};
 
@@ -340,7 +340,7 @@ impl PartialMerkleTree {
 }
 
 impl Encodable for PartialMerkleTree {
-    fn consensus_encode<S: io::Write>(&self, mut s: S) -> Result<usize, io::Error> {
+    fn consensus_encode<W: io::Write + ?Sized>(&self, s: &mut W) -> Result<usize, io::Error> {
         let ret = self.num_transactions.consensus_encode(&mut s)?
             + self.hashes.consensus_encode(&mut s)?;
         let mut bytes: Vec<u8> = vec![0; (self.bits.len() + 7) / 8];
@@ -356,7 +356,15 @@ impl Decodable for PartialMerkleTree {
         let num_transactions: u32 = Decodable::consensus_decode(&mut d)?;
         let hashes: Vec<TxMerkleNode> = Decodable::consensus_decode(&mut d)?;
 
-        let bytes: Vec<u8> = Decodable::consensus_decode(d)?;
+        let bytes: Vec<u8> = Decodable::consensus_decode(d)? as usize;
+
+        if bytes > MAX_VEC_SIZE {
+            return Err(encode::Error::OversizedVectorAllocation {
+                requested: bytes,
+                max: MAX_VEC_SIZE,
+            });
+        }
+
         let mut bits: Vec<bool> = vec![false; bytes.len() * 8];
 
         for (p, bit) in bits.iter_mut().enumerate() {
@@ -455,7 +463,7 @@ impl MerkleBlock {
 
         let pmt = PartialMerkleTree::from_txids(block_txids, &matches);
         MerkleBlock {
-            header: *header,
+            header: header.clone(),
             txn: pmt,
         }
     }
@@ -491,7 +499,7 @@ impl MerkleBlock {
 }
 
 impl Encodable for MerkleBlock {
-    fn consensus_encode<S: io::Write>(&self, mut s: S) -> Result<usize, io::Error> {
+    fn consensus_encode<W: io::Write + ?Sized>(&self, s: &mut W) -> Result<usize, io::Error> {
         let len = self.header.consensus_encode(&mut s)?
             + self.txn.consensus_encode(s)?;
         Ok(len)

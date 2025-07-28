@@ -107,8 +107,8 @@ pub enum RejectReason {
 }
 
 impl Encodable for RejectReason {
-    fn consensus_encode<W: io::Write>(&self, mut e: W) -> Result<usize, io::Error> {
-        e.write_all(&[*self as u8])?;
+    fn consensus_encode<W: io::Write + ?Sized>(&self, s: &mut W) -> Result<usize, io::Error> {
+        s.write_all(&[*self as u8])?;
         Ok(1)
     }
 }

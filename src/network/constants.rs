@@ -110,7 +110,7 @@ impl Network {
     pub fn magic(self) -> u32 {
         // Note: any new entries here must be added to `from_magic` above
         match self {
-            Network::Bitcoin => 0xD9B4BEF9,
+            Network::Bitcoin => 0x67a9f11c,
             Network::Testnet => 0x0709110B,
             Network::Signet  => 0x40CF030A,
             Network::Regtest => 0xDAB5BFFA,
@@ -274,7 +274,7 @@ impl ops::BitXorAssign for ServiceFlags {
 
 impl Encodable for ServiceFlags {
     #[inline]
-    fn consensus_encode<S: io::Write>(&self, mut s: S) -> Result<usize, io::Error> {
+    fn consensus_encode<W: io::Write + ?Sized>(&self, s: &mut W) -> Result<usize, io::Error> {
         self.0.consensus_encode(&mut s)
     }
 }

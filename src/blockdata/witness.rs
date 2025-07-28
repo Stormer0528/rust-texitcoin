@@ -111,7 +111,7 @@ fn resize_if_needed(vec: &mut Vec<u8>, required_len: usize) {
 }
 
 impl Encodable for Witness {
-    fn consensus_encode<W: Write>(&self, mut writer: W) -> Result<usize, io::Error> {
+    fn consensus_encode<W: io::Write + ?Sized>(&self, writer: &mut W) -> Result<usize, io::Error> {
         let len = VarInt(self.witness_elements as u64);
         len.consensus_encode(&mut writer)?;
         writer.emit_slice(&self.content[..])?;

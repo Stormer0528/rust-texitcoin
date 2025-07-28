@@ -23,10 +23,10 @@ use util::uint::Uint256;
 
 /// Lowest possible difficulty for Mainnet. See comment on Params::pow_limit for more info.
 const MAX_BITS_BITCOIN: Uint256 = Uint256([
-    0x0000000000000000u64,
-    0x0000000000000000u64,
-    0x0000000000000000u64,
-    0x00000000ffff0000u64,
+    0x00000fffffffffffu64,
+    0xffffffffffffffffu64,
+    0xffffffffffffffffu64,
+    0xffffffffffffffffu64,
 ]);
 /// Lowest possible difficulty for Testnet. See comment on Params::pow_limit for more info.
 const MAX_BITS_TESTNET: Uint256 = Uint256([
@@ -94,15 +94,15 @@ impl Params {
         match network {
             Network::Bitcoin => Params {
                 network: Network::Bitcoin,
-                bip16_time: 1333238400,                 // Apr 1 2012
-                bip34_height: 227931, // 000000000000024b89b42a942fe0d9fea3bb44ab7bd1b19115dd6a759c0808b8
-                bip65_height: 388381, // 000000000000000004c2b624ed5d7756c508d90fd0da2c7c679febfa6c4735f0
-                bip66_height: 363725, // 00000000000000000379eaa19dce8c9b722d46ae6a57c2f1a988119488b50931
-                rule_change_activation_threshold: 1916, // 95%
-                miner_confirmation_window: 2016,
+                bip16_time: 1706236287,
+                bip34_height: 0, // 000000000000024b89b42a942fe0d9fea3bb44ab7bd1b19115dd6a759c0808b8
+                bip65_height: 0, // 000000000000000004c2b624ed5d7756c508d90fd0da2c7c679febfa6c4735f0
+                bip66_height: 0, // 00000000000000000379eaa19dce8c9b722d46ae6a57c2f1a988119488b50931
+                rule_change_activation_threshold: 3,
+                miner_confirmation_window: 16,
                 pow_limit: MAX_BITS_BITCOIN,
-                pow_target_spacing: 10 * 60,            // 10 minutes.
-                pow_target_timespan: 14 * 24 * 60 * 60, // 2 weeks.
+                pow_target_spacing: 3 * 60,            // 3 minutes.
+                pow_target_timespan: 12 * 60, // 12 minutes.
                 allow_min_difficulty_blocks: false,
                 no_pow_retargeting: false,
             },

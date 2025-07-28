@@ -38,7 +38,6 @@ use blockdata::constants::WITNESS_SCALE_FACTOR;
 use blockdata::script::Script;
 use blockdata::witness::Witness;
 use consensus::{encode, Decodable, Encodable};
-use consensus::encode::MAX_VEC_SIZE;
 use hash_types::{Sighash, Txid, Wtxid};
 use VarInt;
 
@@ -614,7 +613,7 @@ impl Transaction {
 impl_consensus_encoding!(TxOut, value, script_pubkey);
 
 impl Encodable for OutPoint {
-    fn consensus_encode<S: io::Write>(&self, mut s: S) -> Result<usize, io::Error> {
+    fn consensus_encode<W: io::Write + ?Sized>(&self, s: &mut W) -> Result<usize, io::Error> {
         let len = self.txid.consensus_encode(&mut s)?;
         Ok(len + self.vout.consensus_encode(s)?)
     }
@@ -629,7 +628,7 @@ impl Decodable for OutPoint {
 }
 
 impl Encodable for TxIn {
-    fn consensus_encode<S: io::Write>(&self, mut s: S) -> Result<usize, io::Error> {
+    fn consensus_encode<W: io::Write + ?Sized>(&self, s: &mut W) -> Result<usize, io::Error> {
         let mut len = 0;
         len += self.previous_output.consensus_encode(&mut s)?;
         len += self.script_sig.consensus_encode(&mut s)?;
@@ -649,7 +648,7 @@ impl Decodable for TxIn {
 }
 
 impl Encodable for Transaction {
-    fn consensus_encode<S: io::Write>(&self, mut s: S) -> Result<usize, io::Error> {
+    fn consensus_encode<W: io::Write + ?Sized>(&self, s: &mut W) -> Result<usize, io::Error> {
         let mut len = 0;
         len += self.version.consensus_encode(&mut s)?;
         // To avoid serialization ambiguity, no inputs means we use BIP141 serialization (see
@@ -679,20 +678,20 @@ impl Encodable for Transaction {
 }
 
 impl Decodable for Transaction {
-    fn consensus_decode<D: io::Read>(d: D) -> Result<Self, encode::Error> {
-        let mut d = d.take(MAX_VEC_SIZE as u64);
-        let version = i32::consensus_decode(&mut d)?;
-        let input = Vec::<TxIn>::consensus_decode(&mut d)?;
-        // segwit
+    fn consensus_decode_from_finite_reader<R: io::Read + ?Sized>(
+        d: &mut R,
+    ) -> Result<Self, encode::Error> {
+        let version = i32::consensus_decode(d)?;
+        let input = Vec::<TxIn>::consensus_decode( d)?;
         if input.is_empty() {
-            let segwit_flag = u8::consensus_decode(&mut d)?;
+            let segwit_flag = u8::consensus_decode_from_finite_reader(r)?;
             match segwit_flag {
                 // BIP144 input witnesses
                 1 => {
-                    let mut input = Vec::<TxIn>::consensus_decode(&mut d)?;
-                    let output = Vec::<TxOut>::consensus_decode(&mut d)?;
+                    let mut input = Vec::<TxIn>::consensus_decode_from_finite_reader(r)?;
+                    let output = Vec::<TxOut>::consensus_decode_from_finite_reader(r)?;
                     for txin in input.iter_mut() {
-                        txin.witness = Decodable::consensus_decode(&mut d)?;
+                        txin.witness = Decodable::consensus_decode_from_finite_reader(r)?;
                     }
                     if !input.is_empty() && input.iter().all(|input| input.witness.is_empty()) {
                         Err(encode::Error::ParseFailed("witness flag set but no witnesses present"))
@@ -701,7 +700,7 @@ impl Decodable for Transaction {
                             version,
                             input,
                             output,
-                            lock_time: Decodable::consensus_decode(d)?,
+                            lock_time: Decodable::consensus_decode_from_finite_reader(r)?,
                         })
                     }
                 }
@@ -713,8 +712,8 @@ impl Decodable for Transaction {
             Ok(Transaction {
                 version,
                 input,
-                output: Decodable::consensus_decode(&mut d)?,
-                lock_time: Decodable::consensus_decode(d)?,
+                output: Decodable::consensus_decode_from_finite_reader(r)?,
+                lock_time: Decodable::consensus_decode_from_finite_reader(r)?,
             })
         }
     }
