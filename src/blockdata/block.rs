@@ -30,20 +30,21 @@ use util::hash::bitcoin_merkle_root;
 use hashes::{Hash, HashEngine};
 use hash_types::{Wtxid, BlockHash, TxMerkleNode, WitnessMerkleNode, WitnessCommitment};
 use util::uint::Uint256;
-use consensus::encode::Encodable;
+use consensus::{encode, Decodable, Encodable};
 use network::constants::Network;
 use blockdata::transaction::Transaction;
 use blockdata::constants::{max_target, WITNESS_SCALE_FACTOR};
 use blockdata::script;
 use VarInt;
+use io::{self};
 
 /// A block header, which contains all the block's information except
 /// the actual transactions
-#[derive(Copy, PartialEq, Eq, Clone, Debug)]
+#[derive(PartialEq, Eq, Clone, Debug)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub struct BlockHeader {
     /// The protocol version. Should always be 1.
-    pub version: i32,
+    pub version: Version,
     /// Reference to the previous block in the chain.
     pub prev_blockhash: BlockHash,
     /// The root hash of the merkle tree of transactions in the block.
@@ -54,16 +55,190 @@ pub struct BlockHeader {
     /// a float (with well-defined rounding, of course).
     pub bits: u32,
     /// The nonce, selected to obtain a low enough blockhash.
+    pub nonce: u32,    
+    /// AuxPow header data
+    pub aux_data: Option<AuxPow>,
+}
+
+//impl_consensus_encoding!(Header, version, prev_blockhash, merkle_root, time, bits, nonce);
+impl Decodable for BlockHeader {
+    fn consensus_decode_from_finite_reader<R: io::Read + ?Sized>(
+        reader: &mut R,
+    ) -> Result<Self, encode::Error> {
+        let base = SimpleHeader::consensus_decode_from_finite_reader(reader)?;
+        if (base.version.0 & 0x100) == 0 {
+            return Ok(BlockHeader {
+                version: base.version,
+                prev_blockhash: base.prev_blockhash,
+                merkle_root: base.merkle_root,
+                time: base.time,
+                bits: base.bits,
+                nonce: base.nonce,
+                aux_data: None,
+            });
+        } else {
+            let aux_data = AuxPow::consensus_decode_from_finite_reader(reader)?;
+            Ok(BlockHeader {
+                version: base.version,
+                prev_blockhash: base.prev_blockhash,
+                merkle_root: base.merkle_root,
+                time: base.time,
+                bits: base.bits,
+                nonce: base.nonce,
+                aux_data: Some(aux_data),
+            })
+        }
+    }
+
+    fn consensus_decode<R: io::Read + ?Sized>(reader: &mut R) -> Result<Self, encode::Error> {
+        use crate::io::Read as _;
+        let mut r = reader.take(encode::MAX_VEC_SIZE as u64);
+        let thing = SimpleHeader::consensus_decode(r.by_ref())?;
+        if (thing.version.0 & 0x100) == 0 {
+            return Ok(BlockHeader {
+                version: thing.version,
+                prev_blockhash: thing.prev_blockhash,
+                merkle_root: thing.merkle_root,
+                time: thing.time,
+                bits: thing.bits,
+                nonce: thing.nonce,
+                aux_data: None,
+            });
+        } else {
+            let aux_data = AuxPow::consensus_decode(r.by_ref())?;
+            Ok(BlockHeader {
+                version: thing.version,
+                prev_blockhash: thing.prev_blockhash,
+                merkle_root: thing.merkle_root,
+                time: thing.time,
+                bits: thing.bits,
+                nonce: thing.nonce,
+                aux_data: Some(aux_data),
+            })
+        }
+    }
+}
+
+impl Encodable for BlockHeader {
+    fn consensus_encode<W: io::Write + ?Sized>(&self, writer: &mut W) -> Result<usize, io::Error> {
+        let mut len = self.version.consensus_encode(writer)?;
+        len += self.prev_blockhash.consensus_encode(writer)?;
+        len += self.merkle_root.consensus_encode(writer)?;
+        len += self.time.consensus_encode(writer)?;
+        len += self.bits.consensus_encode(writer)?;
+        len += self.nonce.consensus_encode(writer)?;
+        if (self.version.0 & 0x100) != 0 {
+            len += self.aux_data.as_ref().unwrap().consensus_encode(writer)?;
+        }
+        Ok(len)
+    }
+}
+
+
+#[derive(Copy, PartialEq, Eq, Clone, PartialOrd, Ord, Hash)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+pub struct SimpleHeader {
+    /// Block version, now repurposed for soft fork signalling.
+    pub version: Version,
+    /// Reference to the previous block in the chain.
+    pub prev_blockhash: BlockHash,
+    /// The root hash of the merkle tree of transactions in the block.
+    pub merkle_root: TxMerkleNode,
+    /// The timestamp of the block, as claimed by the miner.
+    pub time: u32,
+    /// The target value below which the blockhash must lie.
+    pub bits: u32,
+    /// The nonce, selected to obtain a low enough blockhash.
     pub nonce: u32,
 }
 
-impl_consensus_encoding!(BlockHeader, version, prev_blockhash, merkle_root, time, bits, nonce);
+#[derive(Copy, PartialEq, Eq, Clone, Debug, PartialOrd, Ord, Hash)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+pub struct Version(pub i32);
+
+impl Version {
+    /// The original Bitcoin Block v1.
+    pub const ONE: Self = Self(1);
+    /// BIP-34 Block v2.
+    pub const TWO: Self = Self(2);
+    /// BIP-9 compatible version number that does not signal for any softforks.
+    pub const NO_SOFT_FORK_SIGNALLING: Self = Self(Self::USE_VERSION_BITS as i32);
+    /// BIP-9 soft fork signal bits mask.
+    const VERSION_BITS_MASK: u32 = 0x1FFF_FFFF;
+    /// 32bit value starting with `001` to use version bits.
+    ///
+    /// The value has the top three bits `001` which enables the use of version bits to signal for soft forks.
+    const USE_VERSION_BITS: u32 = 0x2000_0000;
+    /// Creates a [`Version`] from a signed 32 bit integer value.
+    ///
+    /// This is the data type used in consensus code in Bitcoin Core.
+    pub fn from_consensus(v: i32) -> Self {
+        Version(v)
+    }
+
+    /// Returns the inner `i32` value.
+    ///
+    /// This is the data type used in consensus code in Bitcoin Core.
+    pub fn to_consensus(self) -> i32 { self.0 }
+
+    /// Returns the inner `u32` value.
+    ///
+    /// This is the data type used in consensus code in Bitcoin Core.
+    pub fn to_u32(&self) -> Option<u32> {
+        if self.0 >= 0 {
+            Some(self.0 as u32)
+        } else {
+            None // Or handle error if you expect negative values
+        }
+    }
+
+    /// Checks whether the version number is signalling a soft fork at the given bit.
+    ///
+    /// A block is signalling for a soft fork under BIP-9 if the first 3 bits are `001` and
+    /// the version bit for the specific soft fork is toggled on.
+    pub fn is_signalling_soft_fork(&self, bit: u8) -> bool {
+        // Only bits [0, 28] inclusive are used for signalling.
+        if bit > 28 {
+            return false;
+        }
+        // To signal using version bits, the first three bits must be `001`.
+        if (self.0 as u32) & !Self::VERSION_BITS_MASK != Self::USE_VERSION_BITS {
+            return false;
+        }
+        // The bit is set if signalling a soft fork.
+        (self.0 as u32 & Self::VERSION_BITS_MASK) & (1 << bit) > 0
+    }
+}
+
+impl Encodable for Version {
+    fn consensus_encode<W: io::Write + ?Sized>(&self, w: &mut W) -> Result<usize, io::Error> {
+        self.0.consensus_encode(w)
+    }
+}
+impl Decodable for Version {
+    fn consensus_decode<R: io::Read + ?Sized>(r: &mut R) -> Result<Self, encode::Error> {
+        Decodable::consensus_decode(r).map(Version)
+    }
+}
+
+impl_consensus_encoding!(SimpleHeader, version, prev_blockhash, merkle_root, time, bits, nonce);
 
 impl BlockHeader {
+    pub fn to_simple_header(&self) -> SimpleHeader {
+        SimpleHeader {
+            version: self.version,
+            prev_blockhash: self.prev_blockhash,
+            merkle_root: self.merkle_root,
+            time: self.time,
+            bits: self.bits,
+            nonce: self.nonce,
+        }
+    }
+
     /// Returns the block hash.
     pub fn block_hash(&self) -> BlockHash {
         let mut engine = BlockHash::engine();
-        self.consensus_encode(&mut engine).expect("engines don't error");
+        self.to_simple_header().consensus_encode(&mut engine).expect("engines don't error");
         BlockHash::from_engine(engine)
     }
 
@@ -152,6 +327,14 @@ impl BlockHeader {
         ret = ret / ret1;
         ret.increment();
         ret
+    }
+
+    pub fn get_size(&self) -> usize {
+        if self.aux_data.is_none() {
+            return 80
+        }else{
+            80 + self.aux_data.as_ref().unwrap().get_size()
+        }
     }
 }
 
@@ -251,7 +434,7 @@ impl Block {
 
     /// base_size == size of header + size of encoded transaction count.
     fn base_size(&self) -> usize {
-        80 + VarInt(self.txdata.len() as u64).len()
+        self.header.get_size() + VarInt(self.txdata.len() as u64).len()
     }
 
     /// Returns the size of the block.
@@ -309,7 +492,7 @@ impl Block {
         // number (including a sign bit). Height is the height of the mined
         // block in the block chain, where the genesis block is height zero (0).
 
-        if self.header.version < 2 {
+        if self.header.version < Version(2) {
             return Err(Bip34Error::Unsupported);
         }
 
@@ -328,6 +511,62 @@ impl Block {
             }
             _ => Err(Bip34Error::NotPresent),
         }
+    }
+}
+
+impl fmt::Debug for SimpleHeader {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.debug_struct("Header")
+            //.field("block_hash", &self.block_hash())
+            .field("version", &self.version)
+            .field("prev_blockhash", &self.prev_blockhash)
+            .field("merkle_root", &self.merkle_root)
+            .field("time", &self.time)
+            .field("bits", &self.bits)
+            .field("nonce", &self.nonce)
+            .finish()
+    }
+}
+
+#[derive(PartialEq, Eq, Clone, Debug, PartialOrd, Ord, Hash)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+pub struct MerkleBranch {
+    pub hashes: Vec<BlockHash>,
+    // Bitmask of which side of the merkle hash function the branch_hash element should go on.
+    // Zero means it goes on the right, One means on the left.
+    // It is equal to the index of the starting hash within the widest level
+    // of the merkle tree for this merkle branch.
+    pub side_mask: u32,
+}
+impl_consensus_encoding!(MerkleBranch, hashes, side_mask);
+
+#[derive(PartialEq, Eq, Clone, Debug, PartialOrd, Ord, Hash)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+
+pub struct AuxPow {
+    pub coinbase_tx: Transaction,
+    pub block_hash: BlockHash,
+    pub coinbase_branch: MerkleBranch,
+    pub blockchain_branch: MerkleBranch,
+    pub parent_block: SimpleHeader,
+}
+
+impl_consensus_encoding!(
+    AuxPow,
+    coinbase_tx,
+    block_hash,
+    coinbase_branch,
+    blockchain_branch,
+    parent_block
+);
+impl AuxPow {
+    // Returns the block hash of the parent block.
+    pub fn get_size(&self) -> usize {
+        self.coinbase_tx.get_size()
+            + 32
+            + self.coinbase_branch.hashes.len() * 32
+            + self.blockchain_branch.hashes.len() * 32
+            + 80
     }
 }
 

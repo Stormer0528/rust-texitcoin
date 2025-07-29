@@ -79,15 +79,16 @@ fn addr_to_be(addr: [u16; 8]) -> [u16; 8] {
 
 impl Encodable for Address {
     #[inline]
-    fn consensus_encode<W: io::Write + ?Sized>(&self, w: &mut W) -> Result<usize, io::Error> {
-        let mut len = self.services.consensus_encode(w)?;
+    fn consensus_encode<W: io::Write + ?Sized>(&self, s: &mut W) -> Result<usize, io::Error> {
+        let mut len = self.services.consensus_encode(s)?
+            + addr_to_be(self.address).consensus_encode(s)?;
 
         for word in &self.address {
-            w.write_all(&word.to_be_bytes())?;
+            s.write_all(&word.to_be_bytes())?;
             len += 2;
         }
 
-        w.write_all(&self.port.to_be_bytes())?;
+        s.write_all(&self.port.to_be_bytes())?;
         len += 2;
           
         Ok(len)
