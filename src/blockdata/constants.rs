@@ -28,7 +28,7 @@ use hashes::sha256d;
 use blockdata::opcodes;
 use blockdata::script;
 use blockdata::transaction::{OutPoint, Transaction, TxOut, TxIn};
-use blockdata::block::{Block, BlockHeader};
+use blockdata::block::{Block, BlockHeader, Version};
 use blockdata::witness::Witness;
 use network::constants::Network;
 use util::uint::Uint256;
@@ -52,9 +52,9 @@ pub const WITNESS_SCALE_FACTOR: usize = 4;
 /// The maximum allowed number of signature check operations in a block
 pub const MAX_BLOCK_SIGOPS_COST: i64 = 80_000;
 /// Mainnet (bitcoin) pubkey address prefix.
-pub const PUBKEY_ADDRESS_PREFIX_MAIN: u8 = 0; // 0x00
+pub const PUBKEY_ADDRESS_PREFIX_MAIN: u8 = 0x42;
 /// Mainnet (bitcoin) script address prefix.
-pub const SCRIPT_ADDRESS_PREFIX_MAIN: u8 = 5; // 0x05
+pub const SCRIPT_ADDRESS_PREFIX_MAIN: u8 = 0x41;
 /// Test (tesnet, signet, regtest) pubkey address prefix.
 pub const PUBKEY_ADDRESS_PREFIX_TEST: u8 = 111; // 0x6f
 /// Test (tesnet, signet, regtest) script address prefix.
@@ -62,7 +62,7 @@ pub const SCRIPT_ADDRESS_PREFIX_TEST: u8 = 196; // 0xc4
 /// The maximum allowed script size.
 pub const MAX_SCRIPT_ELEMENT_SIZE: usize = 520;
 /// How may blocks between halvings.
-pub const SUBSIDY_HALVING_INTERVAL: u32 = 210_000;
+pub const SUBSIDY_HALVING_INTERVAL: u32 = 695_662;
 
 /// In Bitcoind this is insanely described as ~((u256)0 >> 32)
 pub fn max_target(_: Network) -> Uint256 {
@@ -124,12 +124,13 @@ pub fn genesis_block(network: Network) -> Block {
         Network::Bitcoin => {
             Block {
                 header: BlockHeader {
-                    version: 1,
+                    version: Version::ONE,
                     prev_blockhash: Default::default(),
                     merkle_root,
-                    time: 1231006505,
-                    bits: 0x1d00ffff,
-                    nonce: 2083236893
+                    time: 1706236287,
+                    bits: 0x1e0ffff0,
+                    nonce: 481803,
+                    aux_data: None,
                 },
                 txdata,
             }
@@ -137,12 +138,13 @@ pub fn genesis_block(network: Network) -> Block {
         Network::Testnet => {
             Block {
                 header: BlockHeader {
-                    version: 1,
+                    version: Version::ONE,
                     prev_blockhash: Default::default(),
                     merkle_root,
                     time: 1296688602,
                     bits: 0x1d00ffff,
-                    nonce: 414098458
+                    nonce: 414098458,
+                    aux_data: None
                 },
                 txdata,
             }
@@ -150,12 +152,13 @@ pub fn genesis_block(network: Network) -> Block {
         Network::Signet => {
             Block {
                 header: BlockHeader {
-                    version: 1,
+                    version: Version::ONE,
                     prev_blockhash: Default::default(),
                     merkle_root,
                     time: 1598918400,
                     bits: 0x1e0377ae,
-                    nonce: 52613770
+                    nonce: 52613770,
+                    aux_data: None
                 },
                 txdata,
             }
@@ -163,12 +166,13 @@ pub fn genesis_block(network: Network) -> Block {
         Network::Regtest => {
             Block {
                 header: BlockHeader {
-                    version: 1,
+                    version: Version::ONE,
                     prev_blockhash: Default::default(),
                     merkle_root,
                     time: 1296688602,
                     bits: 0x207fffff,
-                    nonce: 2
+                    nonce: 2,
+                    aux_data: None
                 },
                 txdata,
             }
