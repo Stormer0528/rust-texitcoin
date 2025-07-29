@@ -181,6 +181,11 @@ impl ServiceFlags {
     pub fn as_u64(self) -> u64 {
         self.0
     }
+
+    /// Gets the integer representation of this [`ServiceFlags`].
+    pub fn to_u64(self) -> u64 {
+        self.0
+    }
 }
 
 impl fmt::LowerHex for ServiceFlags {
@@ -274,15 +279,15 @@ impl ops::BitXorAssign for ServiceFlags {
 
 impl Encodable for ServiceFlags {
     #[inline]
-    fn consensus_encode<S: io::Write>(&self, mut s: S) -> Result<usize, io::Error> {
-        self.0.consensus_encode(&mut s)
+    fn consensus_encode<W: io::Write + ?Sized>(&self, w: &mut W) -> Result<usize, io::Error> {
+        self.0.consensus_encode(w)
     }
 }
 
 impl Decodable for ServiceFlags {
     #[inline]
-    fn consensus_decode<D: io::Read>(mut d: D) -> Result<Self, encode::Error> {
-        Ok(ServiceFlags(Decodable::consensus_decode(&mut d)?))
+    fn consensus_decode<R: io::Read + ?Sized>(r: &mut R) -> Result<Self, encode::Error> {
+        Ok(ServiceFlags(Decodable::consensus_decode(r)?))
     }
 }
 

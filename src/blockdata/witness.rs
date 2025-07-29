@@ -3,11 +3,13 @@
 //! This module contains the [`Witness`] struct and related methods to operate on it
 //!
 
-use consensus::encode::{Error, MAX_VEC_SIZE};
-use consensus::{Decodable, Encodable, WriteExt};
-use io::{self, Read, Write};
-use prelude::*;
-use VarInt;
+use crate::blockdata::transaction::EcdsaSighashType;
+use crate::consensus::encode::{Error, MAX_VEC_SIZE};
+use crate::consensus::{Decodable, Encodable, WriteExt};
+use crate::io::{self, Read, Write};
+use crate::prelude::*;
+use secp256k1::ecdsa;
+use crate::VarInt;
 
 #[cfg(feature = "serde")]
 use serde;
@@ -20,7 +22,7 @@ use serde;
 /// For serialization and deserialization performance it is stored internally as a single `Vec`,
 /// saving some allocations.
 ///
-#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Debug, Hash)]
+#[derive(Clone, Default, PartialEq, Eq, PartialOrd, Ord, Debug, Hash)]
 pub struct Witness {
     /// contains the witness Vec<Vec<u8>> serialization without the initial varint indicating the
     /// number of elements (which is stored in `witness_elements`)
@@ -41,11 +43,14 @@ pub struct Witness {
 }
 
 /// Support structure to allow efficient and convenient iteration over the Witness elements
-pub struct Iter<'a>(::core::slice::Iter<'a, u8>);
+pub struct Iter<'a> {
+    inner: core::slice::Iter<'a, u8>,
+    remaining: usize,
+}
 
 impl Decodable for Witness {
-    fn consensus_decode<D: Read>(mut d: D) -> Result<Self, Error> {
-        let witness_elements = VarInt::consensus_decode(&mut d)?.0 as usize;
+    fn consensus_decode<R: Read + ?Sized>(r: &mut R) -> Result<Self, Error> {
+        let witness_elements = VarInt::consensus_decode(r)?.0 as usize;
         if witness_elements == 0 {
             Ok(Witness::default())
         } else {
@@ -60,17 +65,17 @@ impl Decodable for Witness {
             for _ in 0..witness_elements {
                 second_to_last = last;
                 last = cursor;
-                let element_size_varint = VarInt::consensus_decode(&mut d)?;
+                let element_size_varint = VarInt::consensus_decode(r)?;
                 let element_size_varint_len = element_size_varint.len();
                 let element_size = element_size_varint.0 as usize;
                 let required_len = cursor
                     .checked_add(element_size)
-                    .ok_or_else(|| self::Error::OversizedVectorAllocation {
+                    .ok_or(self::Error::OversizedVectorAllocation {
                         requested: usize::max_value(),
                         max: MAX_VEC_SIZE,
                     })?
                     .checked_add(element_size_varint_len)
-                    .ok_or_else(|| self::Error::OversizedVectorAllocation {
+                    .ok_or(self::Error::OversizedVectorAllocation {
                         requested: usize::max_value(),
                         max: MAX_VEC_SIZE,
                     })?;
@@ -84,9 +89,9 @@ impl Decodable for Witness {
 
                 resize_if_needed(&mut content, required_len);
                 element_size_varint
-                    .consensus_encode(&mut content[cursor..cursor + element_size_varint_len])?;
+                    .consensus_encode(&mut &mut content[cursor..cursor + element_size_varint_len])?;
                 cursor += element_size_varint_len;
-                d.read_exact(&mut content[cursor..cursor + element_size])?;
+                r.read_exact(&mut content[cursor..cursor + element_size])?;
                 cursor += element_size;
             }
             content.truncate(cursor);
@@ -111,10 +116,10 @@ fn resize_if_needed(vec: &mut Vec<u8>, required_len: usize) {
 }
 
 impl Encodable for Witness {
-    fn consensus_encode<W: Write>(&self, mut writer: W) -> Result<usize, io::Error> {
+    fn consensus_encode<W: Write + ?Sized>(&self, w: &mut W) -> Result<usize, io::Error> {
         let len = VarInt(self.witness_elements as u64);
-        len.consensus_encode(&mut writer)?;
-        writer.emit_slice(&self.content[..])?;
+        len.consensus_encode(w)?;
+        w.emit_slice(&self.content[..])?;
         Ok(self.content.len() + len.len())
     }
 }
@@ -143,7 +148,7 @@ impl Witness {
             last = cursor;
             let el_len_varint = VarInt(el.len() as u64);
             el_len_varint
-                .consensus_encode(&mut content[cursor..cursor + el_len_varint.len()])
+                .consensus_encode(&mut &mut content[cursor..cursor + el_len_varint.len()])
                 .expect("writers on vec don't errors, space granted by content_size");
             cursor += el_len_varint.len();
             content[cursor..cursor + el.len()].copy_from_slice(&el);
@@ -170,7 +175,7 @@ impl Witness {
 
     /// Returns a struct implementing [`Iterator`]
     pub fn iter(&self) -> Iter {
-        Iter(self.content.iter())
+        Iter { inner: self.content.iter(), remaining: self.witness_elements }
     }
 
     /// Returns the number of elements this witness holds
@@ -206,13 +211,24 @@ impl Witness {
             .resize(current_content_len + element_len_varint.len() + new_element.len(), 0);
         let end_varint = current_content_len + element_len_varint.len();
         element_len_varint
-            .consensus_encode(&mut self.content[current_content_len..end_varint])
+            .consensus_encode(&mut &mut self.content[current_content_len..end_varint])
             .expect("writers on vec don't error, space granted through previous resize");
         self.content[end_varint..].copy_from_slice(new_element);
     }
 
+    /// Pushes a DER-encoded ECDSA signature with a signature hash type as a new element on the
+    /// witness, requires an allocation.
+    pub fn push_bitcoin_signature(&mut self, signature: &ecdsa::SerializedSignature, hash_type: EcdsaSighashType) {
+        // Note that a maximal length ECDSA signature is 72 bytes, plus the sighash type makes 73
+        let mut sig = [0; 73];
+        sig[..signature.len()].copy_from_slice(signature);
+        sig[signature.len()] = hash_type as u8;
+        self.push(&sig[..signature.len() + 1]);
+    }
+
+
     fn element_at(&self, index: usize) -> Option<&[u8]> {
-        let varint = VarInt::consensus_decode(&self.content[index..]).ok()?;
+        let varint = VarInt::consensus_decode(&mut &self.content[index..]).ok()?;
         let start = index + varint.len();
         Some(&self.content[start..start + varint.0 as usize])
     }
@@ -236,34 +252,28 @@ impl Witness {
     }
 }
 
-impl Default for Witness {
-    fn default() -> Self {
-        // from https://doc.rust-lang.org/std/vec/struct.Vec.html#method.new
-        // The vector will not allocate until elements are pushed onto it.
-        Witness {
-            content: Vec::new(),
-            witness_elements: 0,
-            last: 0,
-            second_to_last: 0,
-        }
-    }
-}
-
 impl<'a> Iterator for Iter<'a> {
     type Item = &'a [u8];
 
     fn next(&mut self) -> Option<Self::Item> {
-        let varint = VarInt::consensus_decode(self.0.as_slice()).ok()?;
-        self.0.nth(varint.len() - 1)?; // VarInt::len returns at least 1
+        let varint = VarInt::consensus_decode(&mut self.inner.as_slice()).ok()?;
+        self.inner.nth(varint.len() - 1)?; // VarInt::len returns at least 1
         let len = varint.0 as usize;
-        let slice = &self.0.as_slice()[..len];
+        let slice = &self.inner.as_slice()[..len];
         if len > 0 {
             // we don't need to advance if the element is empty
-            self.0.nth(len - 1)?;
+            self.inner.nth(len - 1)?;
         }
+        self.remaining -= 1;
         Some(slice)
     }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        (self.remaining, Some(self.remaining))
+    }
 }
+
+impl<'a> ExactSizeIterator for Iter<'a> {}
 
 // Serde keep backward compatibility with old Vec<Vec<u8>> format
 #[cfg(feature = "serde")]
@@ -289,10 +299,12 @@ impl<'de> serde::Deserialize<'de> for Witness {
 
 #[cfg(test)]
 mod test {
-    use blockdata::witness::Witness;
-    use consensus::{deserialize, serialize};
-    use hashes::hex::{FromHex, ToHex};
-    use Transaction;
+    use super::*;
+
+    use crate::consensus::{deserialize, serialize};
+    use crate::hashes::hex::{FromHex, ToHex};
+    use crate::Transaction;
+    use crate::secp256k1::ecdsa;
 
     #[test]
     fn test_push() {
@@ -319,6 +331,35 @@ mod test {
         assert_eq!(witness, expected);
         assert_eq!(witness.last(), Some(&[2u8, 3u8][..]));
         assert_eq!(witness.second_to_last(), Some(&[0u8][..]));
+    }
+
+
+    #[test]
+    fn test_iter_len() {
+        let mut witness = Witness::default();
+        for i in 0..5 {
+            assert_eq!(witness.iter().len(), i);
+            witness.push(&vec![0u8]);
+        }
+        let mut iter = witness.iter();
+        for i in (0..=5).rev() {
+            assert_eq!(iter.len(), i);
+            iter.next();
+        }
+    }
+
+    #[test]
+    fn test_push_ecdsa_sig() {
+        // The very first signature in block 734,958
+        let sig_bytes =
+            Vec::from_hex("304402207c800d698f4b0298c5aac830b822f011bb02df41eb114ade9a6702f364d5e39c0220366900d2a60cab903e77ef7dd415d46509b1f78ac78906e3296f495aa1b1b541");
+        let sig = ecdsa::Signature::from_der(&sig_bytes.unwrap()).unwrap();
+        let mut witness = Witness::default();
+        witness.push_bitcoin_signature(&sig.serialize_der(), EcdsaSighashType::All);
+        let expected_witness = vec![Vec::from_hex(
+            "304402207c800d698f4b0298c5aac830b822f011bb02df41eb114ade9a6702f364d5e39c0220366900d2a60cab903e77ef7dd415d46509b1f78ac78906e3296f495aa1b1b54101")
+            .unwrap()];
+        assert_eq!(witness.to_vec(), expected_witness);
     }
 
     #[test]
@@ -391,4 +432,32 @@ mod test {
         let back = serde_json::from_str(&new).unwrap();
         assert_eq!(new_witness_format, back);
     }
+}
+
+
+#[cfg(all(test, feature = "unstable"))]
+mod benches {
+    use test::{Bencher, black_box};
+    use super::Witness;
+
+    #[bench]
+    pub fn bench_big_witness_to_vec(bh: &mut Bencher) {
+        let raw_witness = vec![vec![1u8]; 5];
+        let witness = Witness::from_vec(raw_witness);
+
+        bh.iter(|| {
+            black_box(witness.to_vec());
+        });
+    }
+
+    #[bench]
+    pub fn bench_witness_to_vec(bh: &mut Bencher) {
+        let raw_witness = vec![vec![1u8]; 3];
+        let witness = Witness::from_vec(raw_witness);
+
+        bh.iter(|| {
+            black_box(witness.to_vec());
+        });
+    }
+
 }

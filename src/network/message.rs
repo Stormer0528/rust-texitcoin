@@ -20,23 +20,28 @@
 
 use prelude::*;
 
-use core::{mem, fmt, iter};
+use core::{fmt, iter};
 
-use io;
-use blockdata::block;
-use blockdata::transaction;
-use network::address::{Address, AddrV2Message};
-use network::{message_network, message_bloom};
-use network::message_blockdata;
-use network::message_filter;
-use consensus::encode::{CheckedData, Decodable, Encodable, VarInt, MAX_VEC_SIZE};
-use consensus::{encode, serialize};
-use util::merkleblock::MerkleBlock;
+use crate::io;
+use io::Read as _;
+use crate::blockdata::block;
+use crate::blockdata::transaction;
+use crate::network::address::{Address, AddrV2Message};
+use crate::network::{message_network, message_bloom};
+use crate::network::message_blockdata;
+use crate::network::message_filter;
+use crate::consensus::encode::{CheckedData, Decodable, Encodable, VarInt};
+use crate::consensus::{encode, serialize};
+use crate::util::merkleblock::MerkleBlock;
 
 /// The maximum number of [super::message_blockdata::Inventory] items in an `inv` message.
 ///
 /// This limit is not currently enforced by this implementation.
 pub const MAX_INV_SIZE: usize = 50_000;
+
+/// Maximum size, in bytes, of an encoded message
+/// This by neccessity should be larger tham `MAX_VEC_SIZE`
+pub const MAX_MSG_SIZE: usize = 5_000_000;
 
 /// Serializer for command string
 #[derive(PartialEq, Eq, Clone, Debug)]
@@ -75,19 +80,19 @@ impl AsRef<str> for CommandString {
 
 impl Encodable for CommandString {
     #[inline]
-    fn consensus_encode<S: io::Write>(&self, s: S) -> Result<usize, io::Error> {
+    fn consensus_encode<W: io::Write + ?Sized>(&self, w: &mut W) -> Result<usize, io::Error> {
         let mut rawbytes = [0u8; 12];
         let strbytes = self.0.as_bytes();
         debug_assert!(strbytes.len() <= 12);
         rawbytes[..strbytes.len()].copy_from_slice(strbytes);
-        rawbytes.consensus_encode(s)
+        rawbytes.consensus_encode(w)
     }
 }
 
 impl Decodable for CommandString {
     #[inline]
-    fn consensus_decode<D: io::Read>(d: D) -> Result<Self, encode::Error> {
-        let rawbytes: [u8; 12] = Decodable::consensus_decode(d)?;
+    fn consensus_decode<R: io::Read + ?Sized>(r: &mut R) -> Result<Self, encode::Error> {
+        let rawbytes: [u8; 12] = Decodable::consensus_decode(r)?;
         let rv = iter::FromIterator::from_iter(
             rawbytes
                 .iter()
@@ -278,22 +283,22 @@ struct HeaderSerializationWrapper<'a>(&'a Vec<block::BlockHeader>);
 
 impl<'a> Encodable for HeaderSerializationWrapper<'a> {
     #[inline]
-    fn consensus_encode<S: io::Write>(&self, mut s: S) -> Result<usize, io::Error> {
+    fn consensus_encode<W: io::Write + ?Sized>(&self, w: &mut W) -> Result<usize, io::Error> {
         let mut len = 0;
-        len += VarInt(self.0.len() as u64).consensus_encode(&mut s)?;
+        len += VarInt(self.0.len() as u64).consensus_encode(w)?;
         for header in self.0.iter() {
-            len += header.consensus_encode(&mut s)?;
-            len += 0u8.consensus_encode(&mut s)?;
+            len += header.consensus_encode(w)?;
+            len += 0u8.consensus_encode(w)?;
         }
         Ok(len)
     }
 }
 
 impl Encodable for RawNetworkMessage {
-    fn consensus_encode<S: io::Write>(&self, mut s: S) -> Result<usize, io::Error> {
+    fn consensus_encode<W: io::Write + ?Sized>(&self, w: &mut W) -> Result<usize, io::Error> {
         let mut len = 0;
-        len += self.magic.consensus_encode(&mut s)?;
-        len += self.command().consensus_encode(&mut s)?;
+        len += self.magic.consensus_encode(w)?;
+        len += self.command().consensus_encode(w)?;
         len += CheckedData(match self.payload {
             NetworkMessage::Version(ref dat) => serialize(dat),
             NetworkMessage::Addr(ref dat)    => serialize(dat),
@@ -328,7 +333,7 @@ impl Encodable for RawNetworkMessage {
             | NetworkMessage::FilterClear
             | NetworkMessage::SendAddrV2 => vec![],
             NetworkMessage::Unknown { payload: ref data, .. } => serialize(data),
-        }).consensus_encode(&mut s)?;
+        }).consensus_encode(w)?;
         Ok(len)
     }
 }
@@ -337,30 +342,31 @@ struct HeaderDeserializationWrapper(Vec<block::BlockHeader>);
 
 impl Decodable for HeaderDeserializationWrapper {
     #[inline]
-    fn consensus_decode<D: io::Read>(mut d: D) -> Result<Self, encode::Error> {
-        let len = VarInt::consensus_decode(&mut d)?.0;
-        let byte_size = (len as usize)
-                            .checked_mul(mem::size_of::<block::BlockHeader>())
-                            .ok_or(encode::Error::ParseFailed("Invalid length"))?;
-        if byte_size > MAX_VEC_SIZE {
-            return Err(encode::Error::OversizedVectorAllocation { requested: byte_size, max: MAX_VEC_SIZE })
-        }
-        let mut ret = Vec::with_capacity(len as usize);
+    fn consensus_decode_from_finite_reader<R: io::Read + ?Sized>(r: &mut R) -> Result<Self, encode::Error> {
+        let len = VarInt::consensus_decode(r)?.0;
+        // should be above usual number of items to avoid
+        // allocation
+        let mut ret = Vec::with_capacity(core::cmp::min(1024 * 16, len as usize));
         for _ in 0..len {
-            ret.push(Decodable::consensus_decode(&mut d)?);
-            if u8::consensus_decode(&mut d)? != 0u8 {
+            ret.push(Decodable::consensus_decode(r)?);
+            if u8::consensus_decode(r)? != 0u8 {
                 return Err(encode::Error::ParseFailed("Headers message should not contain transactions"));
             }
         }
         Ok(HeaderDeserializationWrapper(ret))
     }
+
+    #[inline]
+    fn consensus_decode<R: io::Read + ?Sized>(r: &mut R) -> Result<Self, encode::Error> {
+        Self::consensus_decode_from_finite_reader(r.take(MAX_MSG_SIZE as u64).by_ref())
+    }
 }
 
 impl Decodable for RawNetworkMessage {
-    fn consensus_decode<D: io::Read>(mut d: D) -> Result<Self, encode::Error> {
-        let magic = Decodable::consensus_decode(&mut d)?;
-        let cmd = CommandString::consensus_decode(&mut d)?;
-        let raw_payload = CheckedData::consensus_decode(&mut d)?.0;
+    fn consensus_decode_from_finite_reader<R: io::Read + ?Sized>(r: &mut R) -> Result<Self, encode::Error> {
+        let magic = Decodable::consensus_decode_from_finite_reader(r)?;
+        let cmd = CommandString::consensus_decode_from_finite_reader(r)?;
+        let raw_payload = CheckedData::consensus_decode_from_finite_reader(r)?.0;
 
         let mut mem_d = io::Cursor::new(raw_payload);
         let payload = match &cmd.0[..] {
@@ -407,6 +413,11 @@ impl Decodable for RawNetworkMessage {
             magic,
             payload,
         })
+    }
+
+    #[inline]
+    fn consensus_decode<R: io::Read + ?Sized>(r: &mut R) -> Result<Self, encode::Error> {
+        Self::consensus_decode_from_finite_reader(r.take(MAX_MSG_SIZE as u64).by_ref())
     }
 }
 
